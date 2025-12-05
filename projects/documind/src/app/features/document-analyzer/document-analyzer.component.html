@@ -1,0 +1,260 @@
+<div class="documind-container">
+  <!-- Header -->
+  <header class="header">
+    <div class="header-content">
+      <h1 class="logo">
+        <span class="logo-icon">&#128196;</span>
+        DocuMind
+      </h1>
+      <p class="tagline">Análisis de documentos con IA directamente en tu navegador</p>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="main-content">
+    <!-- WebGPU Check Error -->
+    @if (step() === 'error' && !capabilities()?.supported) {
+      <div class="error-panel card fade-in">
+        <div class="error-icon">&#9888;</div>
+        <h2>WebGPU No Disponible</h2>
+        <p>{{ capabilities()?.reason }}</p>
+        <div class="browser-info">
+          <h3>Navegadores Compatibles:</h3>
+          <ul>
+            <li>Chrome 113+ (Windows, macOS)</li>
+            <li>Edge 113+ (Windows, macOS)</li>
+            <li>Safari 26+ (macOS, Tech Preview)</li>
+            <li>Firefox 141+ (Windows, con limitaciones)</li>
+          </ul>
+        </div>
+      </div>
+    }
+
+    <!-- Checking Capabilities -->
+    @if (step() === 'checking') {
+      <div class="loading-panel card fade-in">
+        <div class="spinner"></div>
+        <p>Verificando capacidades de WebGPU...</p>
+      </div>
+    }
+
+    <!-- Model Selection -->
+    @if (step() === 'idle' && capabilities()?.supported) {
+      <div class="model-selection card fade-in">
+        <h2>Selecciona un Modelo</h2>
+        <p class="section-description">
+          Elige el modelo según tus recursos. Los modelos se descargan una vez y se cachean localmente.
+        </p>
+
+        @if (storageEstimate(); as storage) {
+          <div class="storage-info">
+            <span class="storage-label">Almacenamiento disponible:</span>
+            <span class="storage-value">{{ webgpu.formatBytes(storage.available) }}</span>
+          </div>
+        }
+
+        <div class="model-grid">
+          @for (model of models; track model.id) {
+            <button
+              class="model-card"
+              [class.selected]="selectedModelId() === model.id"
+              [class.disabled]="model.requiresShaderF16 && !capabilities()?.hasShaderF16"
+              (click)="selectModel(model.id)"
+              [disabled]="model.requiresShaderF16 && !capabilities()?.hasShaderF16"
+            >
+              <div class="model-header">
+                <span class="model-name">{{ model.name }}</span>
+                <span class="model-vram badge badge-info">{{ model.vram }}</span>
+              </div>
+              <p class="model-description">{{ model.description }}</p>
+              @if (model.requiresShaderF16 && !capabilities()?.hasShaderF16) {
+                <span class="badge badge-warning">Requiere shader-f16</span>
+              }
+            </button>
+          }
+        </div>
+
+        <button class="btn btn-primary load-btn" (click)="loadModel()">
+          Cargar Modelo
+        </button>
+      </div>
+    }
+
+    <!-- Loading Model -->
+    @if (step() === 'loading') {
+      <div class="loading-model card fade-in">
+        <h2>Cargando {{ selectedModel()?.name }}</h2>
+        <div class="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" [style.width.%]="loadingPercentage()"></div>
+          </div>
+          <span class="progress-text">{{ loadingPercentage() }}%</span>
+        </div>
+        <p class="loading-status">{{ loadingProgress().text }}</p>
+        @if (loadingProgress().timeElapsed) {
+          <p class="time-elapsed">Tiempo transcurrido: {{ loadingProgress().timeElapsed | number:'1.0-0' }}s</p>
+        }
+        <p class="loading-note">
+          La primera carga descarga el modelo (~{{ selectedModel()?.vram }}).
+          Las cargas posteriores serán instantáneas desde caché.
+        </p>
+      </div>
+    }
+
+    <!-- Ready - Document Analysis -->
+    @if (step() === 'ready' || step() === 'analyzing') {
+      <div class="analysis-panel fade-in">
+        <!-- Document Input -->
+        <div class="input-section card">
+          <div class="section-header">
+            <h2>Documento</h2>
+            <div class="header-actions">
+              <label class="btn btn-secondary file-upload">
+                <input type="file" accept=".txt,.md,.csv" (change)="handleFileUpload($event)" hidden>
+                Cargar archivo
+              </label>
+              <button class="btn btn-secondary" (click)="clearDocument()" [disabled]="!documentText()">
+                Limpiar
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            class="document-input"
+            placeholder="Pega o escribe el texto del documento aquí..."
+            [ngModel]="documentText()"
+            (ngModelChange)="documentText.set($event)"
+            [disabled]="isGenerating()"
+          ></textarea>
+
+          @if (documentMetadata(); as meta) {
+            <div class="document-stats">
+              <span>{{ meta.wordCount }} palabras</span>
+              <span>{{ meta.estimatedTokens }} tokens (est.)</span>
+              <span>{{ meta.paragraphCount }} párrafos</span>
+              @if (needsChunking()) {
+                <span class="badge badge-warning">Requiere fragmentación</span>
+              }
+            </div>
+          }
+        </div>
+
+        <!-- Analysis Options -->
+        <div class="options-section card">
+          <button class="options-toggle" (click)="toggleAdvancedOptions()">
+            <span>Opciones avanzadas</span>
+            <span class="toggle-icon">{{ showAdvancedOptions() ? '&#9650;' : '&#9660;' }}</span>
+          </button>
+
+          @if (showAdvancedOptions()) {
+            <div class="advanced-options fade-in">
+              <div class="option-group">
+                <label>
+                  <input type="checkbox" [ngModel]="useCustomPrompt()" (ngModelChange)="useCustomPrompt.set($event)">
+                  Usar prompt personalizado
+                </label>
+              </div>
+
+              @if (useCustomPrompt()) {
+                <div class="option-group">
+                  <label for="customPrompt">System Prompt:</label>
+                  <textarea
+                    id="customPrompt"
+                    class="custom-prompt"
+                    placeholder="Instrucciones para el modelo..."
+                    [ngModel]="customPrompt()"
+                    (ngModelChange)="customPrompt.set($event)"
+                  ></textarea>
+                </div>
+              }
+
+              <div class="option-row">
+                <div class="option-group">
+                  <label for="temperature">Temperatura: {{ temperature() }}</label>
+                  <input
+                    type="range"
+                    id="temperature"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    [ngModel]="temperature()"
+                    (ngModelChange)="temperature.set($event)"
+                  >
+                  <small>Menor = más determinístico, Mayor = más creativo</small>
+                </div>
+
+                <div class="option-group">
+                  <label for="maxTokens">Tokens máximos: {{ maxTokens() }}</label>
+                  <input
+                    type="range"
+                    id="maxTokens"
+                    min="256"
+                    max="4096"
+                    step="256"
+                    [ngModel]="maxTokens()"
+                    (ngModelChange)="maxTokens.set($event)"
+                  >
+                </div>
+              </div>
+            </div>
+          }
+
+          <div class="action-buttons">
+            @if (!isGenerating()) {
+              <button
+                class="btn btn-primary analyze-btn"
+                (click)="analyzeDocument()"
+                [disabled]="!canAnalyze()"
+              >
+                Analizar Documento
+              </button>
+            } @else {
+              <button class="btn btn-danger" (click)="stopGeneration()">
+                Detener
+              </button>
+            }
+          </div>
+        </div>
+
+        <!-- Analysis Result -->
+        @if (analysisResult() || isGenerating()) {
+          <div class="result-section card fade-in">
+            <div class="section-header">
+              <h2>Análisis</h2>
+              @if (analysisResult() && !isGenerating()) {
+                <button class="btn btn-secondary" (click)="copyResult()">
+                  Copiar
+                </button>
+              }
+            </div>
+
+            <div class="result-content markdown-content">
+              @if (isGenerating()) {
+                <span class="cursor-blink">&#9608;</span>
+              }
+              {{ analysisResult() }}
+            </div>
+          </div>
+        }
+
+        <!-- Model Info Footer -->
+        <div class="model-footer">
+          <span class="current-model">
+            Modelo activo: <strong>{{ selectedModel()?.name }}</strong>
+          </span>
+          <button class="btn btn-secondary btn-sm" (click)="step.set('idle')">
+            Cambiar modelo
+          </button>
+        </div>
+      </div>
+    }
+  </div>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <p>
+      Procesamiento 100% local con WebGPU.
+      Tus documentos nunca salen de tu dispositivo.
+    </p>
+  </footer>
+</div>
