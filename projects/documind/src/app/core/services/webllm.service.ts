@@ -124,9 +124,6 @@ export class WebLLMService {
       }
 
       this.engine = await webllm.CreateMLCEngine(modelId, {
-        appConfig: {
-          useIndexedDBCache: true
-        },
         initProgressCallback: (progress) => {
           const timeElapsed = (Date.now() - this.loadStartTime) / 1000;
           this.loadingProgress.set({

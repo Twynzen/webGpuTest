@@ -27,7 +27,7 @@ type AnalysisStep = 'idle' | 'checking' | 'loading' | 'ready' | 'analyzing' | 'e
 })
 export class DocumentAnalyzerComponent implements OnInit, OnDestroy {
   private readonly webllm = inject(WebLLMService);
-  private readonly webgpu = inject(WebGPUDetectionService);
+  readonly webgpu = inject(WebGPUDetectionService);
 
   // UI State
   readonly step = signal<AnalysisStep>('idle');

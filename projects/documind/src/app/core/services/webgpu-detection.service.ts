@@ -59,14 +59,11 @@ export class WebGPUDetectionService {
         return result;
       }
 
-      // Get adapter info
-      const adapterInfo = await adapter.requestAdapterInfo();
-
       const result: WebGPUCapabilities = {
         supported: true,
         hasShaderF16: adapter.features.has('shader-f16'),
         maxBufferSize: adapter.limits.maxBufferSize,
-        adapterInfo
+        adapterInfo: adapter.info
       };
 
       this.capabilities.set(result);
