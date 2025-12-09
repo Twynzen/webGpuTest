@@ -1,7 +1,15 @@
 import { Routes } from '@angular/router';
 
 export const routes: Routes = [
-  { path: '', redirectTo: 'npc-brain', pathMatch: 'full' },
+  { path: '', redirectTo: 'npc-vendor-3d', pathMatch: 'full' },
+  {
+    path: 'npc-vendor-3d',
+    loadComponent: () =>
+      import('./features/npc-vendor-3d/npc-vendor-3d.component').then(
+        (m) => m.NpcVendor3dComponent
+      ),
+    title: 'NPC Vendor 3D - RAG Enhanced AI',
+  },
   {
     path: 'npc-brain',
     loadComponent: () =>
@@ -42,5 +50,5 @@ export const routes: Routes = [
       ),
     title: 'Live Translator - Speech to Text',
   },
-  { path: '**', redirectTo: 'npc-brain' },
+  { path: '**', redirectTo: 'npc-vendor-3d' },
 ];
