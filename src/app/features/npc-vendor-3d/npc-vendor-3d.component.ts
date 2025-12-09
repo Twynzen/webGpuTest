@@ -12,142 +12,189 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import * as THREE from 'three';
-import { NpcVendorService, VendorChatMessage } from '../../core/services/npc/npc-vendor.service';
+import { NpcVendorService } from '../../core/services/npc/npc-vendor.service';
 import { InventoryService } from '../../core/services/npc/inventory.service';
+
+/**
+ * Application state machine
+ */
+type AppState = 'loading' | 'playing' | 'dialogue';
 
 /**
  * NPC Vendor 3D Component
  *
- * A complete 3D scene with:
- * - Room environment (bar/shop)
- * - Player character (capsule) with WASD movement
- * - NPC Vendor (cube) with proximity detection
- * - [E] key interaction to open chat
- * - RAG-enhanced AI conversation
- *
- * This demonstrates how to integrate AI-powered NPCs into a 3D game environment.
+ * Features:
+ * - Model loads FIRST before showing 3D scene
+ * - Dialogue UI (not modal) with space for NPC portrait
+ * - Internal prompts are hidden from player
+ * - Responds in player's language
  */
 @Component({
   selector: 'app-npc-vendor-3d',
   standalone: true,
   imports: [CommonModule, FormsModule],
   template: `
-    <div class="game-container">
-      <!-- 3D Canvas -->
-      <div #sceneContainer class="scene-container"></div>
+    <!-- ═══════════════════════════════════════════════════════════════════
+         LOADING SCREEN - Shows FIRST while AI models load
+         ═══════════════════════════════════════════════════════════════════ -->
+    @if (appState() === 'loading') {
+      <div class="loading-screen">
+        <div class="loading-content">
+          <div class="loading-icon">
+            <div class="cube-spinner"></div>
+          </div>
+          <h1>Cargando NPC Vendedor</h1>
+          <p class="loading-status">{{ vendor.initStatus() || 'Iniciando...' }}</p>
 
-      <!-- HUD Overlay -->
-      <div class="hud">
-        <!-- Player Stats -->
-        <div class="player-stats">
-          <div class="stat">
-            <span class="stat-label">HP</span>
-            <div class="stat-bar hp-bar">
-              <div
-                class="stat-fill"
-                [style.width.%]="(inventory.playerHP() / inventory.playerMaxHP()) * 100"
-              ></div>
+          <div class="loading-stages">
+            <div class="stage" [class.active]="vendor.initStage() === 'embeddings'" [class.done]="isStageComplete('embeddings')">
+              <span class="stage-dot"></span>
+              <span>Modelo de Embeddings</span>
             </div>
-            <span class="stat-value">{{ inventory.playerHP() }}/{{ inventory.playerMaxHP() }}</span>
+            <div class="stage" [class.active]="vendor.initStage() === 'knowledge'" [class.done]="isStageComplete('knowledge')">
+              <span class="stage-dot"></span>
+              <span>Base de Conocimiento</span>
+            </div>
+            <div class="stage" [class.active]="vendor.initStage() === 'llm'" [class.done]="isStageComplete('llm')">
+              <span class="stage-dot"></span>
+              <span>Modelo de IA (LLM)</span>
+            </div>
           </div>
-          <div class="stat">
-            <span class="stat-label">Gold</span>
-            <span class="stat-value gold">{{ inventory.playerGold() }}</span>
-          </div>
-        </div>
 
-        <!-- Interaction Prompt -->
-        @if (canInteract() && !isChatOpen()) {
-          <div class="interaction-prompt">
-            <span class="key">E</span>
-            <span>Talk to Grimlock</span>
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div class="progress-fill" [style.width.%]="vendor.initProgress()"></div>
+            </div>
+            <span class="progress-text">{{ vendor.initProgress() }}%</span>
           </div>
-        }
 
-        <!-- Controls Help -->
-        <div class="controls-help">
-          <span>WASD to move</span>
-          @if (canInteract()) {
-            <span>E to interact</span>
+          @if (vendor.initStage() === 'llm') {
+            <p class="loading-hint">Primera carga descarga ~900MB. Después usa caché local.</p>
           }
         </div>
       </div>
+    }
 
-      <!-- Loading Screen -->
-      @if (!isSceneReady()) {
-        <div class="loading-screen">
-          <div class="loading-content">
-            <h2>Loading NPC Vendor Demo</h2>
-            <p>{{ vendor.initStatus() || 'Initializing...' }}</p>
-            <div class="progress-bar">
-              <div
-                class="progress-fill"
-                [style.width.%]="vendor.initProgress()"
-              ></div>
-            </div>
-            <p class="progress-text">{{ vendor.initProgress() }}%</p>
-          </div>
-        </div>
-      }
+    <!-- ═══════════════════════════════════════════════════════════════════
+         GAME SCREEN - 3D Scene + HUD + Dialogue
+         ═══════════════════════════════════════════════════════════════════ -->
+    @if (appState() !== 'loading') {
+      <div class="game-container">
+        <!-- 3D Canvas -->
+        <div #sceneContainer class="scene-container"></div>
 
-      <!-- Chat Panel -->
-      @if (isChatOpen()) {
-        <div class="chat-overlay" (click)="closeChat()">
-          <div class="chat-panel" (click)="$event.stopPropagation()">
-            <div class="chat-header">
-              <div class="npc-info">
-                <div class="npc-avatar">G</div>
-                <div class="npc-details">
-                  <span class="npc-name">Grimlock</span>
-                  <span class="npc-title">Merchant</span>
-                </div>
+        <!-- HUD Overlay -->
+        <div class="hud">
+          <!-- Player Stats -->
+          <div class="player-stats">
+            <div class="stat">
+              <span class="stat-label">HP</span>
+              <div class="stat-bar">
+                <div
+                  class="stat-fill hp"
+                  [style.width.%]="(inventory.playerHP() / inventory.playerMaxHP()) * 100"
+                ></div>
               </div>
-              <button class="close-btn" (click)="closeChat()">×</button>
+              <span class="stat-value">{{ inventory.playerHP() }}/{{ inventory.playerMaxHP() }}</span>
             </div>
-
-            <div class="chat-messages" #chatMessages>
-              @for (msg of chatHistory(); track msg.timestamp) {
-                <div class="message" [class.user]="msg.role === 'user'">
-                  <div class="message-content">{{ msg.content }}</div>
-                </div>
-              }
-              @if (vendor.isThinking()) {
-                <div class="message thinking">
-                  <div class="typing-indicator">
-                    <span></span><span></span><span></span>
-                  </div>
-                </div>
-              }
-            </div>
-
-            <div class="chat-input">
-              <input
-                type="text"
-                [(ngModel)]="messageInput"
-                (keyup.enter)="sendMessage()"
-                placeholder="Talk to Grimlock..."
-                [disabled]="vendor.isThinking()"
-                #chatInput
-              />
-              <button
-                (click)="sendMessage()"
-                [disabled]="!messageInput.trim() || vendor.isThinking()"
-              >
-                Send
-              </button>
-            </div>
-
-            <!-- Quick Actions -->
-            <div class="quick-actions">
-              <button (click)="askAbout('What items do you sell?')">Show Items</button>
-              <button (click)="askAbout('What healing do you have?')">Healing</button>
-              <button (click)="askAbout('Any weapons?')">Weapons</button>
-              <button (click)="askAbout('Tell me about yourself')">About You</button>
+            <div class="stat gold-stat">
+              <span class="stat-label">ORO</span>
+              <span class="stat-value gold">{{ inventory.playerGold() }}</span>
             </div>
           </div>
+
+          <!-- Interaction Prompt (when near NPC and not in dialogue) -->
+          @if (canInteract() && appState() === 'playing') {
+            <div class="interaction-prompt">
+              <span class="key">E</span>
+              <span>Hablar con Grimlock</span>
+            </div>
+          }
+
+          <!-- Controls -->
+          <div class="controls-help">
+            @if (appState() === 'playing') {
+              <span>WASD mover</span>
+              @if (canInteract()) {
+                <span>E interactuar</span>
+              }
+            } @else {
+              <span>ESC cerrar diálogo</span>
+            }
+          </div>
         </div>
-      }
-    </div>
+
+        <!-- ═══════════════════════════════════════════════════════════════
+             DIALOGUE BOX - Game-style dialogue (not modal)
+             ═══════════════════════════════════════════════════════════════ -->
+        @if (appState() === 'dialogue') {
+          <div class="dialogue-container">
+            <!-- NPC Portrait Area -->
+            <div class="npc-portrait-area">
+              <div class="portrait-frame">
+                <div class="portrait-placeholder">
+                  <span class="portrait-letter">G</span>
+                </div>
+                <div class="portrait-name">Grimlock</div>
+                <div class="portrait-title">Comerciante</div>
+              </div>
+            </div>
+
+            <!-- Dialogue Panel -->
+            <div class="dialogue-panel">
+              <!-- Chat Messages -->
+              <div class="dialogue-messages" #chatMessages>
+                @for (msg of chatHistory(); track msg.timestamp) {
+                  <div class="dialogue-message" [class.player]="msg.role === 'user'">
+                    @if (msg.role === 'user') {
+                      <span class="message-author">Tú:</span>
+                    }
+                    <span class="message-text">{{ msg.content }}</span>
+                  </div>
+                }
+                @if (vendor.isThinking()) {
+                  <div class="dialogue-message typing">
+                    <span class="typing-dots"><span></span><span></span><span></span></span>
+                  </div>
+                }
+              </div>
+
+              <!-- Input Area -->
+              <div class="dialogue-input-area">
+                <input
+                  type="text"
+                  [(ngModel)]="messageInput"
+                  (keyup.enter)="sendMessage()"
+                  placeholder="Escribe tu mensaje..."
+                  [disabled]="vendor.isThinking()"
+                  #chatInput
+                />
+                <button
+                  class="send-btn"
+                  (click)="sendMessage()"
+                  [disabled]="!messageInput.trim() || vendor.isThinking()"
+                >
+                  Enviar
+                </button>
+              </div>
+
+              <!-- Quick Actions -->
+              <div class="quick-actions">
+                <button (click)="askAbout('¿Qué vendes?')">Ver Items</button>
+                <button (click)="askAbout('¿Tienes pociones?')">Pociones</button>
+                <button (click)="askAbout('¿Tienes armas?')">Armas</button>
+                <button (click)="askAbout('¿Quién eres?')">Sobre ti</button>
+              </div>
+            </div>
+
+            <!-- Close Button -->
+            <button class="close-dialogue-btn" (click)="closeDialogue()">
+              ESC
+            </button>
+          </div>
+        }
+      </div>
+    }
   `,
   styles: [`
     :host {
@@ -155,8 +202,141 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
       width: 100%;
       height: 100vh;
       overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
     }
 
+    /* ════════════════════════════════════════════════════════════════════
+       LOADING SCREEN
+       ════════════════════════════════════════════════════════════════════ */
+    .loading-screen {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f0f1a 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .loading-content {
+      text-align: center;
+      color: #fff;
+      max-width: 400px;
+      padding: 20px;
+    }
+
+    .loading-icon {
+      margin-bottom: 24px;
+    }
+
+    .cube-spinner {
+      width: 60px;
+      height: 60px;
+      margin: 0 auto;
+      background: linear-gradient(135deg, #ff6600, #ff8833);
+      border-radius: 8px;
+      animation: cube-spin 2s ease-in-out infinite;
+    }
+
+    @keyframes cube-spin {
+      0%, 100% { transform: rotate(0deg) scale(1); }
+      25% { transform: rotate(90deg) scale(1.1); }
+      50% { transform: rotate(180deg) scale(1); }
+      75% { transform: rotate(270deg) scale(1.1); }
+    }
+
+    .loading-content h1 {
+      font-size: 24px;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .loading-status {
+      color: #888;
+      margin-bottom: 24px;
+      min-height: 24px;
+    }
+
+    .loading-stages {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
+      text-align: left;
+    }
+
+    .stage {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #555;
+      transition: color 0.3s;
+    }
+
+    .stage.active {
+      color: #ff6600;
+    }
+
+    .stage.done {
+      color: #44ff44;
+    }
+
+    .stage-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.5;
+    }
+
+    .stage.active .stage-dot {
+      animation: pulse-dot 1s ease-in-out infinite;
+    }
+
+    .stage.done .stage-dot {
+      opacity: 1;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 0.5; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    .progress-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .progress-bar {
+      flex: 1;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #ff6600, #ffaa00);
+      transition: width 0.3s ease;
+    }
+
+    .progress-text {
+      font-family: monospace;
+      color: #ff6600;
+      min-width: 45px;
+    }
+
+    .loading-hint {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #666;
+    }
+
+    /* ════════════════════════════════════════════════════════════════════
+       GAME CONTAINER
+       ════════════════════════════════════════════════════════════════════ */
     .game-container {
       position: relative;
       width: 100%;
@@ -184,15 +364,14 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
 
     .player-stats {
       display: flex;
-      gap: 20px;
-      align-items: center;
+      gap: 16px;
     }
 
     .stat {
       display: flex;
       align-items: center;
       gap: 8px;
-      background: rgba(0, 0, 0, 0.6);
+      background: rgba(0, 0, 0, 0.7);
       padding: 8px 16px;
       border-radius: 8px;
       border: 1px solid rgba(255, 255, 255, 0.1);
@@ -201,50 +380,52 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
     .stat-label {
       font-weight: bold;
       color: #888;
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
     }
 
     .stat-bar {
-      width: 100px;
-      height: 8px;
+      width: 80px;
+      height: 6px;
       background: rgba(255, 255, 255, 0.1);
-      border-radius: 4px;
+      border-radius: 3px;
       overflow: hidden;
     }
 
     .stat-fill {
       height: 100%;
-      background: linear-gradient(90deg, #ff4444, #ff6666);
       transition: width 0.3s ease;
     }
 
-    .hp-bar .stat-fill {
-      background: linear-gradient(90deg, #44ff44, #66ff66);
+    .stat-fill.hp {
+      background: linear-gradient(90deg, #22cc44, #44ff66);
     }
 
     .stat-value {
       font-family: monospace;
+      font-size: 12px;
       color: #fff;
     }
 
     .stat-value.gold {
       color: #ffd700;
+      font-size: 14px;
+      font-weight: bold;
     }
 
     .interaction-prompt {
       position: absolute;
-      bottom: 150px;
+      bottom: 200px;
       left: 50%;
       transform: translateX(-50%);
       display: flex;
       align-items: center;
       gap: 12px;
-      background: rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.85);
       padding: 12px 24px;
-      border-radius: 12px;
+      border-radius: 8px;
       border: 2px solid #ff6600;
-      animation: pulse 2s ease-in-out infinite;
+      animation: float 2s ease-in-out infinite;
     }
 
     .interaction-prompt .key {
@@ -256,239 +437,174 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
       font-family: monospace;
     }
 
+    @keyframes float {
+      0%, 100% { transform: translateX(-50%) translateY(0); }
+      50% { transform: translateX(-50%) translateY(-5px); }
+    }
+
     .controls-help {
       position: absolute;
       bottom: 20px;
       left: 20px;
       display: flex;
       gap: 16px;
-      font-size: 12px;
-      color: #666;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: translateX(-50%) scale(1); }
-      50% { opacity: 0.8; transform: translateX(-50%) scale(1.02); }
+      font-size: 11px;
+      color: #555;
     }
 
     /* ════════════════════════════════════════════════════════════════════
-       Loading Screen
+       DIALOGUE CONTAINER - Game-style dialogue box
        ════════════════════════════════════════════════════════════════════ */
-    .loading-screen {
+    .dialogue-container {
       position: absolute;
-      inset: 0;
-      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 320px;
       display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 100;
+      background: linear-gradient(0deg, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.8) 100%);
+      border-top: 3px solid #ff6600;
     }
 
-    .loading-content {
-      text-align: center;
-      color: #fff;
-    }
-
-    .loading-content h2 {
-      margin-bottom: 16px;
-      font-size: 24px;
-    }
-
-    .loading-content p {
-      color: #888;
-      margin-bottom: 24px;
-    }
-
-    .progress-bar {
-      width: 300px;
-      height: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 4px;
-      overflow: hidden;
-      margin: 0 auto;
-    }
-
-    .progress-fill {
-      height: 100%;
-      background: linear-gradient(90deg, #ff6600, #ffaa00);
-      transition: width 0.3s ease;
-    }
-
-    .progress-text {
-      margin-top: 8px;
-      font-family: monospace;
-      color: #ff6600;
-    }
-
-    /* ════════════════════════════════════════════════════════════════════
-       Chat Panel
-       ════════════════════════════════════════════════════════════════════ */
-    .chat-overlay {
-      position: absolute;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.7);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 50;
-    }
-
-    .chat-panel {
-      width: 500px;
-      max-width: 90%;
-      max-height: 80vh;
-      background: linear-gradient(180deg, #2d2d44 0%, #1a1a2e 100%);
-      border-radius: 16px;
-      border: 2px solid #ff6600;
+    /* NPC Portrait */
+    .npc-portrait-area {
+      width: 200px;
+      padding: 20px;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
-    }
-
-    .chat-header {
-      display: flex;
-      justify-content: space-between;
       align-items: center;
-      padding: 16px;
-      background: rgba(255, 102, 0, 0.2);
-      border-bottom: 1px solid rgba(255, 102, 0, 0.3);
+      border-right: 1px solid rgba(255, 102, 0, 0.3);
     }
 
-    .npc-info {
-      display: flex;
-      align-items: center;
-      gap: 12px;
+    .portrait-frame {
+      text-align: center;
     }
 
-    .npc-avatar {
-      width: 48px;
-      height: 48px;
+    .portrait-placeholder {
+      width: 120px;
+      height: 120px;
       background: linear-gradient(135deg, #ff6600, #ff8833);
-      border-radius: 8px;
+      border-radius: 12px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 24px;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 20px rgba(255, 102, 0, 0.3);
+    }
+
+    .portrait-letter {
+      font-size: 64px;
       font-weight: bold;
       color: #000;
     }
 
-    .npc-details {
-      display: flex;
-      flex-direction: column;
-    }
-
-    .npc-name {
+    .portrait-name {
       font-size: 18px;
       font-weight: bold;
       color: #fff;
     }
 
-    .npc-title {
+    .portrait-title {
       font-size: 12px;
       color: #ff6600;
+      margin-top: 4px;
     }
 
-    .close-btn {
-      width: 32px;
-      height: 32px;
-      border: none;
-      background: rgba(255, 255, 255, 0.1);
-      color: #fff;
-      border-radius: 8px;
-      font-size: 20px;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-
-    .close-btn:hover {
-      background: rgba(255, 255, 255, 0.2);
-    }
-
-    .chat-messages {
+    /* Dialogue Panel */
+    .dialogue-panel {
       flex: 1;
-      overflow-y: auto;
-      padding: 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      min-height: 200px;
-      max-height: 400px;
+      padding: 16px 20px;
+      overflow: hidden;
     }
 
-    .message {
-      display: flex;
+    .dialogue-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding-right: 10px;
+      margin-bottom: 12px;
     }
 
-    .message-content {
-      max-width: 80%;
-      padding: 12px 16px;
-      border-radius: 12px;
-      background: rgba(255, 102, 0, 0.2);
-      color: #fff;
+    .dialogue-message {
+      margin-bottom: 12px;
       line-height: 1.5;
     }
 
-    .message.user {
-      justify-content: flex-end;
+    .dialogue-message .message-author {
+      color: #4499ff;
+      font-weight: bold;
+      margin-right: 8px;
     }
 
-    .message.user .message-content {
-      background: rgba(0, 150, 255, 0.3);
+    .dialogue-message .message-text {
+      color: #ddd;
     }
 
-    .message.thinking .message-content {
-      background: rgba(255, 102, 0, 0.1);
+    .dialogue-message.player {
+      text-align: right;
+      color: #aaa;
     }
 
-    .typing-indicator {
-      display: flex;
+    .dialogue-message.player .message-text {
+      color: #88ccff;
+    }
+
+    .dialogue-message.typing {
+      color: #ff6600;
+    }
+
+    .typing-dots {
+      display: inline-flex;
       gap: 4px;
-      padding: 4px 0;
     }
 
-    .typing-indicator span {
+    .typing-dots span {
       width: 8px;
       height: 8px;
       background: #ff6600;
       border-radius: 50%;
-      animation: typing 1.4s ease-in-out infinite;
+      animation: typing-bounce 1.4s ease-in-out infinite;
     }
 
-    .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-    .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 
-    @keyframes typing {
-      0%, 100% { transform: translateY(0); opacity: 0.5; }
-      50% { transform: translateY(-4px); opacity: 1; }
+    @keyframes typing-bounce {
+      0%, 100% { transform: translateY(0); opacity: 0.4; }
+      50% { transform: translateY(-6px); opacity: 1; }
     }
 
-    .chat-input {
+    /* Input Area */
+    .dialogue-input-area {
       display: flex;
-      gap: 8px;
-      padding: 16px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      gap: 10px;
+      margin-bottom: 12px;
     }
 
-    .chat-input input {
+    .dialogue-input-area input {
       flex: 1;
       padding: 12px 16px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 8px;
-      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 102, 0, 0.4);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.5);
       color: #fff;
       font-size: 14px;
     }
 
-    .chat-input input:focus {
+    .dialogue-input-area input:focus {
       outline: none;
       border-color: #ff6600;
     }
 
-    .chat-input button {
+    .dialogue-input-area input::placeholder {
+      color: #666;
+    }
+
+    .send-btn {
       padding: 12px 24px;
       border: none;
-      border-radius: 8px;
+      border-radius: 6px;
       background: linear-gradient(135deg, #ff6600, #ff8833);
       color: #000;
       font-weight: bold;
@@ -496,28 +612,28 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
       transition: transform 0.2s, opacity 0.2s;
     }
 
-    .chat-input button:hover:not(:disabled) {
+    .send-btn:hover:not(:disabled) {
       transform: scale(1.05);
     }
 
-    .chat-input button:disabled {
+    .send-btn:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
 
+    /* Quick Actions */
     .quick-actions {
       display: flex;
       gap: 8px;
-      padding: 0 16px 16px;
       flex-wrap: wrap;
     }
 
     .quick-actions button {
-      padding: 8px 12px;
-      border: 1px solid rgba(255, 102, 0, 0.5);
-      border-radius: 6px;
+      padding: 8px 14px;
+      border: 1px solid rgba(255, 102, 0, 0.4);
+      border-radius: 4px;
       background: transparent;
-      color: #ff6600;
+      color: #ff9944;
       font-size: 12px;
       cursor: pointer;
       transition: all 0.2s;
@@ -525,6 +641,42 @@ import { InventoryService } from '../../core/services/npc/inventory.service';
 
     .quick-actions button:hover {
       background: rgba(255, 102, 0, 0.2);
+      border-color: #ff6600;
+    }
+
+    /* Close Button */
+    .close-dialogue-btn {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      padding: 8px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.5);
+      color: #888;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .close-dialogue-btn:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+
+    /* Scrollbar */
+    .dialogue-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .dialogue-messages::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 3px;
+    }
+
+    .dialogue-messages::-webkit-scrollbar-thumb {
+      background: rgba(255, 102, 0, 0.4);
+      border-radius: 3px;
     }
   `],
 })
@@ -536,9 +688,8 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly vendor = inject(NpcVendorService);
   readonly inventory = inject(InventoryService);
 
-  // UI State
-  readonly isSceneReady = signal(false);
-  readonly isChatOpen = signal(false);
+  // Application state
+  readonly appState = signal<AppState>('loading');
   readonly canInteract = signal(false);
   messageInput = '';
 
@@ -551,7 +702,7 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
   private renderer!: THREE.WebGLRenderer;
   private player!: THREE.Mesh;
   private npc!: THREE.Mesh;
-  private interactionIndicator!: THREE.Mesh;
+  private interactionRing!: THREE.Mesh;
 
   // Input state
   private keys: Set<string> = new Set();
@@ -562,13 +713,12 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly PLAYER_SPEED = 0.12;
 
   ngOnInit(): void {
-    // Start initializing the AI
-    this.initializeAI();
+    // Start loading AI models FIRST
+    this.loadAIModels();
   }
 
   ngAfterViewInit(): void {
-    this.initializeScene();
-    this.startGameLoop();
+    // Scene will be initialized AFTER models are loaded
   }
 
   ngOnDestroy(): void {
@@ -582,14 +732,16 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
   onKeyDown(event: KeyboardEvent): void {
     this.keys.add(event.code);
 
-    // E key for interaction
-    if (event.code === 'KeyE' && this.canInteract() && !this.isChatOpen()) {
-      this.openChat();
-    }
-
-    // Escape to close chat
-    if (event.code === 'Escape' && this.isChatOpen()) {
-      this.closeChat();
+    if (this.appState() === 'playing') {
+      // E to start dialogue
+      if (event.code === 'KeyE' && this.canInteract()) {
+        this.openDialogue();
+      }
+    } else if (this.appState() === 'dialogue') {
+      // Escape to close dialogue
+      if (event.code === 'Escape') {
+        this.closeDialogue();
+      }
     }
   }
 
@@ -610,11 +762,33 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
     this.renderer.setSize(width, height);
   }
 
-  private async initializeAI(): Promise<void> {
+  /**
+   * Check if a loading stage is complete.
+   */
+  isStageComplete(stage: string): boolean {
+    const stages = ['idle', 'embeddings', 'knowledge', 'llm', 'ready'];
+    const currentIndex = stages.indexOf(this.vendor.initStage());
+    const stageIndex = stages.indexOf(stage);
+    return currentIndex > stageIndex;
+  }
+
+  /**
+   * Load AI models before showing the game.
+   */
+  private async loadAIModels(): Promise<void> {
     try {
       await this.vendor.initialize();
+
+      // Models loaded, now initialize the 3D scene
+      this.appState.set('playing');
+
+      // Wait for Angular to render the container
+      setTimeout(() => {
+        this.initializeScene();
+        this.startGameLoop();
+      }, 100);
     } catch (error) {
-      console.error('Failed to initialize AI:', error);
+      console.error('Failed to load AI models:', error);
     }
   }
 
@@ -641,14 +815,12 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
 
-    // Create scene elements
+    // Create scene
     this.createRoom();
     this.createPlayer();
     this.createNPC();
     this.createLighting();
     this.createDecorations();
-
-    this.isSceneReady.set(true);
   }
 
   private createRoom(): void {
@@ -657,70 +829,50 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
     const floorMaterial = new THREE.MeshStandardMaterial({
       color: 0x3d3d5c,
       roughness: 0.8,
-      metalness: 0.2,
     });
     const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     this.scene.add(floor);
 
-    // Grid pattern on floor
-    const gridHelper = new THREE.GridHelper(20, 20, 0x4a4a6a, 0x2d2d44);
-    gridHelper.position.y = 0.01;
-    this.scene.add(gridHelper);
+    // Grid
+    const grid = new THREE.GridHelper(20, 20, 0x4a4a6a, 0x2d2d44);
+    grid.position.y = 0.01;
+    this.scene.add(grid);
 
     // Walls
-    const wallMaterial = new THREE.MeshStandardMaterial({
-      color: 0x2d2d44,
-      roughness: 0.9,
-    });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0x2d2d44, roughness: 0.9 });
 
-    // Back wall
-    const backWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMaterial);
+    const backWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
     backWall.position.set(0, 5, -10);
-    backWall.receiveShadow = true;
     this.scene.add(backWall);
 
-    // Left wall
-    const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMaterial);
+    const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
     leftWall.rotation.y = Math.PI / 2;
     leftWall.position.set(-10, 5, 0);
     this.scene.add(leftWall);
 
-    // Right wall
-    const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMaterial);
+    const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(20, 10), wallMat);
     rightWall.rotation.y = -Math.PI / 2;
     rightWall.position.set(10, 5, 0);
     this.scene.add(rightWall);
   }
 
   private createPlayer(): void {
-    // Player capsule
     const geometry = new THREE.CapsuleGeometry(0.4, 1, 8, 16);
     const material = new THREE.MeshStandardMaterial({
       color: 0x00ff88,
       emissive: 0x004422,
       emissiveIntensity: 0.3,
-      roughness: 0.5,
     });
     this.player = new THREE.Mesh(geometry, material);
     this.player.position.set(0, 0.9, 5);
     this.player.castShadow = true;
     this.scene.add(this.player);
-
-    // Player glow
-    const glowGeometry = new THREE.SphereGeometry(0.8, 16, 16);
-    const glowMaterial = new THREE.MeshBasicMaterial({
-      color: 0x00ff88,
-      transparent: true,
-      opacity: 0.1,
-    });
-    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-    this.player.add(glow);
   }
 
   private createNPC(): void {
-    // NPC Cube (vendor)
+    // NPC Cube
     const geometry = new THREE.BoxGeometry(1.8, 1.8, 1.8);
     const material = new THREE.MeshStandardMaterial({
       color: 0xff6600,
@@ -735,99 +887,56 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
     this.npc.userData['baseY'] = 0.9;
     this.scene.add(this.npc);
 
-    // Interaction indicator (ring)
-    const ringGeometry = new THREE.RingGeometry(2, 2.2, 32);
-    const ringMaterial = new THREE.MeshBasicMaterial({
+    // Interaction ring
+    const ringGeo = new THREE.RingGeometry(2, 2.2, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
       color: 0xff6600,
       transparent: true,
-      opacity: 0.5,
+      opacity: 0.3,
       side: THREE.DoubleSide,
     });
-    this.interactionIndicator = new THREE.Mesh(ringGeometry, ringMaterial);
-    this.interactionIndicator.rotation.x = -Math.PI / 2;
-    this.interactionIndicator.position.set(0, 0.05, -3);
-    this.scene.add(this.interactionIndicator);
-
-    // NPC name tag
-    // (In a real game, you'd use a sprite or HTML overlay)
+    this.interactionRing = new THREE.Mesh(ringGeo, ringMat);
+    this.interactionRing.rotation.x = -Math.PI / 2;
+    this.interactionRing.position.set(0, 0.05, -3);
+    this.scene.add(this.interactionRing);
   }
 
   private createLighting(): void {
-    // Ambient
     const ambient = new THREE.AmbientLight(0x404060, 0.4);
     this.scene.add(ambient);
 
-    // Main light (tavern chandelier)
     const mainLight = new THREE.PointLight(0xffaa44, 1.5, 25);
     mainLight.position.set(0, 8, 0);
     mainLight.castShadow = true;
-    mainLight.shadow.mapSize.width = 1024;
-    mainLight.shadow.mapSize.height = 1024;
     this.scene.add(mainLight);
 
-    // NPC spotlight
     const npcLight = new THREE.SpotLight(0xff6600, 2, 10, Math.PI / 6);
     npcLight.position.set(0, 6, -3);
     npcLight.target = this.npc;
     this.scene.add(npcLight);
-
-    // Player fill light
-    const playerLight = new THREE.PointLight(0x00ff88, 0.5, 5);
-    playerLight.position.set(0, 3, 5);
-    this.scene.add(playerLight);
   }
 
   private createDecorations(): void {
-    // Counter/table in front of NPC
-    const counterGeometry = new THREE.BoxGeometry(4, 0.8, 1);
-    const counterMaterial = new THREE.MeshStandardMaterial({
-      color: 0x4a3728,
-      roughness: 0.9,
-    });
-    const counter = new THREE.Mesh(counterGeometry, counterMaterial);
+    // Counter
+    const counter = new THREE.Mesh(
+      new THREE.BoxGeometry(4, 0.8, 1),
+      new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.9 })
+    );
     counter.position.set(0, 0.4, -1.5);
     counter.castShadow = true;
-    counter.receiveShadow = true;
     this.scene.add(counter);
 
-    // Some barrels
-    const barrelGeometry = new THREE.CylinderGeometry(0.4, 0.5, 1, 12);
-    const barrelMaterial = new THREE.MeshStandardMaterial({
-      color: 0x5c4033,
-      roughness: 0.9,
-    });
+    // Barrels
+    const barrelGeo = new THREE.CylinderGeometry(0.4, 0.5, 1, 12);
+    const barrelMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
 
-    const barrel1 = new THREE.Mesh(barrelGeometry, barrelMaterial);
+    const barrel1 = new THREE.Mesh(barrelGeo, barrelMat);
     barrel1.position.set(-6, 0.5, -6);
-    barrel1.castShadow = true;
     this.scene.add(barrel1);
 
-    const barrel2 = new THREE.Mesh(barrelGeometry, barrelMaterial);
+    const barrel2 = new THREE.Mesh(barrelGeo, barrelMat);
     barrel2.position.set(-5, 0.5, -7);
-    barrel2.castShadow = true;
     this.scene.add(barrel2);
-
-    // Shelf on back wall
-    const shelfGeometry = new THREE.BoxGeometry(6, 0.2, 0.8);
-    const shelfMaterial = new THREE.MeshStandardMaterial({ color: 0x4a3728 });
-    const shelf = new THREE.Mesh(shelfGeometry, shelfMaterial);
-    shelf.position.set(0, 3, -9.5);
-    this.scene.add(shelf);
-
-    // Bottles on shelf
-    const bottleGeometry = new THREE.CylinderGeometry(0.1, 0.15, 0.5, 8);
-    const colors = [0xff4444, 0x44ff44, 0x4444ff, 0xffff44, 0xff44ff];
-
-    for (let i = 0; i < 5; i++) {
-      const bottleMaterial = new THREE.MeshStandardMaterial({
-        color: colors[i],
-        transparent: true,
-        opacity: 0.8,
-      });
-      const bottle = new THREE.Mesh(bottleGeometry, bottleMaterial);
-      bottle.position.set(-2 + i, 3.35, -9.5);
-      this.scene.add(bottle);
-    }
   }
 
   private startGameLoop(): void {
@@ -840,97 +949,89 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   private update(): void {
-    // Only process movement if chat is closed
-    if (!this.isChatOpen()) {
+    // Movement only when playing
+    if (this.appState() === 'playing') {
       this.handleMovement();
     }
 
-    // NPC floating animation
+    // NPC animation
     const time = Date.now() * 0.001;
     if (this.npc) {
       this.npc.position.y = this.npc.userData['baseY'] + Math.sin(time * 2) * 0.15;
       this.npc.rotation.y += 0.005;
     }
 
-    // Interaction indicator pulse
-    if (this.interactionIndicator) {
+    // Interaction ring
+    if (this.interactionRing) {
       const scale = 1 + Math.sin(time * 3) * 0.1;
-      this.interactionIndicator.scale.set(scale, scale, scale);
+      this.interactionRing.scale.set(scale, scale, scale);
 
-      const canInteract = this.checkProximity();
-      this.canInteract.set(canInteract);
-
-      // Change indicator color based on proximity
-      const material = this.interactionIndicator.material as THREE.MeshBasicMaterial;
-      material.opacity = canInteract ? 0.8 : 0.3;
+      const near = this.checkProximity();
+      this.canInteract.set(near);
+      (this.interactionRing.material as THREE.MeshBasicMaterial).opacity = near ? 0.6 : 0.2;
     }
   }
 
   private handleMovement(): void {
-    const direction = new THREE.Vector3();
+    const dir = new THREE.Vector3();
 
-    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) direction.z -= 1;
-    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) direction.z += 1;
-    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) direction.x -= 1;
-    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) direction.x += 1;
+    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) dir.z -= 1;
+    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) dir.z += 1;
+    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) dir.x -= 1;
+    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) dir.x += 1;
 
-    if (direction.length() > 0) {
-      direction.normalize().multiplyScalar(this.PLAYER_SPEED);
-      this.player.position.add(direction);
+    if (dir.length() > 0) {
+      dir.normalize().multiplyScalar(this.PLAYER_SPEED);
+      this.player.position.add(dir);
 
-      // Clamp to room bounds
+      // Bounds
       this.player.position.x = Math.max(-9, Math.min(9, this.player.position.x));
       this.player.position.z = Math.max(-8, Math.min(9, this.player.position.z));
 
-      // Rotate player to face movement direction
-      if (direction.x !== 0 || direction.z !== 0) {
-        this.player.rotation.y = Math.atan2(direction.x, direction.z);
-      }
+      // Rotation
+      this.player.rotation.y = Math.atan2(dir.x, dir.z);
     }
   }
 
   private checkProximity(): boolean {
     if (!this.player || !this.npc) return false;
-
-    const distance = this.player.position.distanceTo(this.npc.position);
-    return distance <= this.INTERACTION_DISTANCE;
+    return this.player.position.distanceTo(this.npc.position) <= this.INTERACTION_DISTANCE;
   }
 
-  async openChat(): Promise<void> {
-    this.isChatOpen.set(true);
+  async openDialogue(): Promise<void> {
+    this.appState.set('dialogue');
 
-    // Focus input
     setTimeout(() => {
       this.chatInputEl?.nativeElement?.focus();
     }, 100);
 
-    // Get greeting if first message
-    if (this.chatHistory().length === 0 && this.vendor.isReady()) {
+    // Get greeting if first time
+    if (this.chatHistory().length === 0) {
       try {
         await this.vendor.getGreeting();
         this.scrollToBottom();
       } catch (error) {
-        console.error('Failed to get greeting:', error);
+        console.error('Greeting error:', error);
       }
     }
   }
 
-  closeChat(): void {
-    this.isChatOpen.set(false);
+  closeDialogue(): void {
+    this.appState.set('playing');
     this.messageInput = '';
   }
 
   async sendMessage(): Promise<void> {
-    const message = this.messageInput.trim();
-    if (!message || this.vendor.isThinking()) return;
+    const msg = this.messageInput.trim();
+    if (!msg || this.vendor.isThinking()) return;
 
     this.messageInput = '';
 
     try {
-      await this.vendor.chat(message);
+      await this.vendor.chat(msg);
       this.scrollToBottom();
     } catch (error) {
-      console.error('Failed to send message:', error);
+      console.error('Chat error:', error);
     }
   }
 
@@ -941,7 +1042,7 @@ export class NpcVendor3dComponent implements OnInit, AfterViewInit, OnDestroy {
       await this.vendor.chat(question);
       this.scrollToBottom();
     } catch (error) {
-      console.error('Failed to ask:', error);
+      console.error('Ask error:', error);
     }
   }
 
